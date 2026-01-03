@@ -38,8 +38,20 @@ def take_headword(context: Sequence[WrappedToken], pos: int) -> Optional[str]:
         return None
 
 
-def replace_mistake(token: MecabParsedToken, context: Sequence[WrappedToken], pos: int) -> Iterable[MecabParsedToken]:
-    if token.word == "放っ" and slice_headwords(context, pos + 1, pos + 3) in (("て", "おく"), ("て", "おける")):
+def take_word(context: Sequence[WrappedToken], pos: int) -> Optional[str]:
+    try:
+        return context[pos].token.word
+    except IndexError:
+        return None
+
+
+def replace_mistake(
+    token: MecabParsedToken, context: Sequence[WrappedToken], pos: int
+) -> Iterable[MecabParsedToken]:
+    if token.word == "放っ" and slice_headwords(context, pos + 1, pos + 3) in (
+        ("て", "おく"),
+        ("て", "おける"),
+    ):
         yield dataclasses.replace(token, headword="放る", katakana_reading="ホウッ")
     elif token.word == "温玉" and token.headword == "オンセンタマゴ":
         yield dataclasses.replace(
@@ -278,6 +290,62 @@ def replace_mistake(token: MecabParsedToken, context: Sequence[WrappedToken], po
             headword="そう",
             katakana_reading="ソウ",
             part_of_speech=PartOfSpeech.adverb,
+            inflection_type=Inflection.unknown,
+        )
+    elif (
+        token.word == "いじめ"
+        and token.headword == "いじめ"
+        and take_headword(context, pos + 1) == "ないで"
+    ):
+        context[pos + 1].skip = True
+        yield MecabParsedToken(
+            word="いじめ",
+            headword="いじめる",
+            katakana_reading=None,
+            part_of_speech=PartOfSpeech.verb,
+            inflection_type=Inflection.irrealis,
+        )
+        yield MecabParsedToken(
+            word="ない",
+            headword="ない",
+            katakana_reading=None,
+            part_of_speech=PartOfSpeech.bound_auxiliary,
+            inflection_type=Inflection.continuative_de,
+        )
+        yield MecabParsedToken(
+            word="で",
+            headword="で",
+            katakana_reading=None,
+            part_of_speech=PartOfSpeech.particle,
+            inflection_type=Inflection.unknown,
+        )
+    elif (
+        token.word == "いじめ"
+        and token.headword == "いじめ"
+        and take_word(context, pos + 1) == "なく"
+        and take_headword(context, pos + 2) == "て"
+    ):
+        context[pos + 1].skip = True
+        context[pos + 2].skip = True
+        yield MecabParsedToken(
+            word="いじめ",
+            headword="いじめる",
+            katakana_reading=None,
+            part_of_speech=PartOfSpeech.verb,
+            inflection_type=Inflection.irrealis,
+        )
+        yield MecabParsedToken(
+            word="なく",
+            headword="ない",
+            katakana_reading=None,
+            part_of_speech=PartOfSpeech.bound_auxiliary,
+            inflection_type=Inflection.continuative_te,
+        )
+        yield MecabParsedToken(
+            word="て",
+            headword="て",
+            katakana_reading=None,
+            part_of_speech=PartOfSpeech.particle,
             inflection_type=Inflection.unknown,
         )
     else:
