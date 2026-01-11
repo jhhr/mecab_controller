@@ -58,6 +58,12 @@ def replace_mistake(
             token,
             headword="温玉",
         )
+    elif token.headword == "した" and token.word == "した":
+        yield dataclasses.replace(
+            token,
+            headword="する",
+            part_of_speech=PartOfSpeech.verb,
+        )
     elif token.headword == "打付ける":
         yield dataclasses.replace(
             token,
