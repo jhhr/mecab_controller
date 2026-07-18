@@ -24,7 +24,9 @@ def replace_mistakes(tokens: Iterable[MecabParsedToken]) -> Iterable[MecabParsed
         yield from replace_mistake(wrapped.token, consumed, idx)
 
 
-def slice_headwords(context: Sequence[WrappedToken], start: int, end: int) -> Optional[tuple[str, ...]]:
+def slice_headwords(
+    context: Sequence[WrappedToken], start: int, end: int
+) -> Optional[tuple[str, ...]]:
     try:
         return tuple(context[idx].token.headword for idx in range(start, end))
     except IndexError:
@@ -69,18 +71,30 @@ def replace_mistake(
             token,
             katakana_reading=token.katakana_reading.replace("ウチツケ", "ブツケ"),
         )
-    elif token.word == "拗ら" and token.headword == "拗る" and take_headword(context, pos + 1).startswith("せ"):
+    elif (
+        token.word == "拗ら"
+        and token.headword == "拗る"
+        and take_headword(context, pos + 1).startswith("せ")
+    ):
         yield dataclasses.replace(
             token,
             headword="拗らせる",
         )
-    elif token.word == "弄っ" and token.headword == "弄う" and "てる" == take_headword(context, pos + 1):
+    elif (
+        token.word == "弄っ"
+        and token.headword == "弄う"
+        and "てる" == take_headword(context, pos + 1)
+    ):
         yield dataclasses.replace(
             token,
             headword="弄る",
             katakana_reading="イジッ",
         )
-    elif token.word == "荒ん" and token.headword == "荒ぶ" and "だ" == take_headword(context, pos + 1):
+    elif (
+        token.word == "荒ん"
+        and token.headword == "荒ぶ"
+        and "だ" == take_headword(context, pos + 1)
+    ):
         yield dataclasses.replace(
             token,
             headword="荒む",
@@ -109,7 +123,11 @@ def replace_mistake(
             part_of_speech=PartOfSpeech.particle,
             inflection_type=Inflection.unknown,
         )
-    elif token.word == "はおら" and token.headword == "はおる" and "ぬ" == take_headword(context, pos + 1):
+    elif (
+        token.word == "はおら"
+        and token.headword == "はおる"
+        and "ぬ" == take_headword(context, pos + 1)
+    ):
         # Xはおらぬ
         yield MecabParsedToken(
             word="は",
@@ -125,7 +143,11 @@ def replace_mistake(
             part_of_speech=PartOfSpeech.verb,
             inflection_type=Inflection.irrealis,
         )
-    elif token.word == "降り" and token.katakana_reading == "オリ" and "が" == take_headword(context, pos - 1):
+    elif (
+        token.word == "降り"
+        and token.katakana_reading == "オリ"
+        and "が" == take_headword(context, pos - 1)
+    ):
         # 雪が降りました: オ=>フ
         yield dataclasses.replace(
             token,
@@ -242,6 +264,19 @@ def replace_mistake(
         )
     elif token.word == "有り難う" and token.katakana_reading == "アリガタウ":
         yield dataclasses.replace(token, katakana_reading="アリガトウ")
+    elif (
+        token.word == "及び"
+        and token.headword == "及び"
+        and token.part_of_speech == PartOfSpeech.conjunction
+    ):
+        # Reinterpret lexicalized conjunction analysis as continuative form of 及ぶ
+        # so inflection matching can treat noun-form uses like 及び腰 correctly.
+        yield dataclasses.replace(
+            token,
+            headword="及ぶ",
+            part_of_speech=PartOfSpeech.verb,
+            inflection_type=Inflection.continuative,
+        )
     elif token.word == "出て" and token.headword == "出し手" and token.katakana_reading == "ダシテ":
         yield dataclasses.replace(token, headword="出る", katakana_reading="デテ")
     elif token.word == "悪い" and token.katakana_reading == "アクイ" and token.headword == "悪意":
@@ -283,7 +318,9 @@ def replace_mistake(
             part_of_speech=PartOfSpeech.noun,
             inflection_type=Inflection.unknown,
         )
-    elif token.word == "軽そう" and token.katakana_reading == "ケイソウ" and token.headword == "軽装":
+    elif (
+        token.word == "軽そう" and token.katakana_reading == "ケイソウ" and token.headword == "軽装"
+    ):
         yield MecabParsedToken(
             word="軽",
             headword="軽い",
