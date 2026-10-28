@@ -8,6 +8,9 @@ import sys
 
 IS_MAC = sys.platform.startswith("darwin")
 IS_WIN = sys.platform.startswith("win32")
+# sys.platform is "android" from Python 3.13 on (PEP 738); an older build for Android said
+# "linux", but has had sys.getandroidapilevel() since 3.7.
+IS_ANDROID = sys.platform == "android" or hasattr(sys, "getandroidapilevel")
 SUPPORT_DIR = os.path.join(os.path.dirname(__file__), "support")
 
 

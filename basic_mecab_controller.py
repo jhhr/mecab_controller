@@ -7,12 +7,17 @@ import subprocess
 from typing import Optional
 
 try:
-    from .mecab_exe_finder import IS_WIN, SUPPORT_DIR, find_executable
+    from .mecab_exe_finder import IS_ANDROID, IS_WIN, SUPPORT_DIR, find_executable
+    from .mecab_library import InProcessMecab, MecabUnavailableError, describe_os_error, describe_platform
 except ImportError:
-    from mecab_exe_finder import IS_WIN, SUPPORT_DIR, find_executable
+    from mecab_exe_finder import IS_ANDROID, IS_WIN, SUPPORT_DIR, find_executable
+    from mecab_library import InProcessMecab, MecabUnavailableError, describe_os_error, describe_platform
 
 INPUT_BUFFER_SIZE = str(819200)
 MECAB_RC_PATH = os.path.join(SUPPORT_DIR, "mecabrc")
+# "in_process" or "subprocess": how MeCab runs when the code that makes the controller does not
+# say. For trying one backend in place of the other without touching that code.
+BACKEND_ENV = "MECAB_CONTROLLER_BACKEND"
 
 
 @functools.cache
@@ -66,6 +71,22 @@ def mecab_output_to_str(outs: bytes) -> str:
     return outs.rstrip(b"\r\n").decode("utf-8", "replace")
 
 
+def in_process_by_default() -> bool:
+    """
+    Android cannot start the executable (see mecab_library.py), so MeCab runs in process there.
+    Elsewhere the executable stays the default: it is what has always run there, and a crash in
+    a process of its own cannot take the host application down with it.
+    """
+    backend = os.environ.get(BACKEND_ENV, "")
+    if backend == "in_process":
+        return True
+    if backend == "subprocess":
+        return False
+    if backend:
+        raise ValueError(f"{BACKEND_ENV} must be 'in_process' or 'subprocess', not {backend!r}")
+    return IS_ANDROID
+
+
 def prepend_library_path() -> None:
     for library_path in ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
         try:
@@ -84,22 +105,48 @@ class BasicMecabController:
     ]
     _mecab_args: list[str] = []
     _verbose: bool
+    _in_process: Optional[InProcessMecab]
 
     def __init__(
         self,
         mecab_cmd: Optional[list[str]] = None,
         mecab_args: Optional[list[str]] = None,
         verbose: bool = False,
+        in_process: Optional[bool] = None,
     ) -> None:
+        """
+        in_process: load libmecab into this process instead of starting the executable for each
+        call; None leaves it to in_process_by_default(). In process, the options of mecab_cmd
+        are given to the library bundled in "support", whatever program the command names.
+        """
         super().__init__()
         check_mecab_rc()
         self._verbose = verbose
         self._mecab_cmd = normalize_for_platform((mecab_cmd or self._mecab_cmd) + (mecab_args or self._mecab_args))
-        prepend_library_path()
+        if in_process is None:
+            in_process = in_process_by_default()
+        self._in_process = InProcessMecab(self._mecab_cmd) if in_process else None
+        if not in_process:
+            prepend_library_path()
         if self._verbose:
-            print("mecab cmd:", self._mecab_cmd)
+            print("mecab cmd:", self._mecab_cmd, "(in process)" if in_process else "")
+
+    @property
+    def in_process(self) -> bool:
+        return self._in_process is not None
 
     def run(self, expr: str) -> str:
+        if self._in_process is not None:
+            outs = self._in_process.run(expr_to_bytes(expr))
+        else:
+            outs = self._run_executable(expr)
+
+        str_out = mecab_output_to_str(outs)
+        if "tagger.cpp" in str_out and "no such file or directory" in str_out:
+            raise RuntimeError("Please ensure your Windows user name contains only English characters.")
+        return str_out
+
+    def _run_executable(self, expr: str) -> bytes:
         try:
             proc = subprocess.Popen(
                 self._mecab_cmd,
@@ -109,19 +156,18 @@ class BasicMecabController:
                 stderr=subprocess.STDOUT,
                 startupinfo=startup_info(),
             )
-        except OSError:
-            raise Exception("Please ensure your Linux system has 64 bit binary support.")
+        except OSError as e:
+            exe = self._mecab_cmd[0]
+            raise MecabUnavailableError(
+                f"MeCab could not be started on {describe_platform()}: {exe}: {describe_os_error(e, exe)}"
+            ) from e
 
         try:
             outs, errs = proc.communicate(expr_to_bytes(expr), timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
             outs, errs = proc.communicate()
-
-        str_out = mecab_output_to_str(outs)
-        if "tagger.cpp" in str_out and "no such file or directory" in str_out:
-            raise RuntimeError("Please ensure your Windows user name contains only English characters.")
-        return str_out
+        return outs
 
 
 def main():

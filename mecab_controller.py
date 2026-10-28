@@ -64,11 +64,13 @@ class MecabController:
         mecab_args: Optional[list[str]] = None,
         verbose: bool = False,
         cache_max_size: int = 1024,
+        in_process: Optional[bool] = None,
     ) -> None:
         self._mecab = BasicMecabController(
             mecab_cmd=mecab_cmd,
             mecab_args=(mecab_args or self._mecab_args),
             verbose=verbose,
+            in_process=in_process,
         )
         self._cache.set_capacity(cache_max_size)
         self._verbose = verbose
