@@ -1,0 +1,4 @@
+# MeCab reads the files in support/ exactly as they are. Git on Windows would otherwise check
+# the text ones out with CRLF line endings (core.autocrlf), and MeCab's rc parser rejects the
+# blank lines of a CRLF dicrc everywhere but on Windows, whose executable reads it in text mode.
+support/** -text

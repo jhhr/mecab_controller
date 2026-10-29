@@ -4,6 +4,7 @@
 import functools
 import os
 import subprocess
+import tempfile
 from typing import Optional
 
 try:
@@ -61,6 +62,40 @@ def check_mecab_rc():
         with open(MECAB_RC_PATH, "w") as f:
             # create mecabrc if it doesn't exist
             f.write("")
+
+
+def mend_line_endings(path: str) -> None:
+    """
+    Give a bundled MeCab config file back the LF line endings it has in the repository.
+    Git on Windows checks text files out with CRLF (core.autocrlf), and the mecab executable
+    there reads them in text mode, which drops the CR again. Everywhere else MeCab reads the
+    bytes as they are, so a blank line is "\\r", which its rc parser rejects ("format error"):
+    an add-on packaged from a Windows checkout could start MeCab on Windows only, and on
+    Android in process not at all. The repository's .gitattributes keeps new checkouts from
+    doing this; this mends a file that came from an older one. A file that cannot be mended
+    is left alone, and MeCab then says what is wrong with it.
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return
+    if b"\r\n" not in data:
+        return
+    directory = os.path.dirname(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp")
+    except OSError:
+        return
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data.replace(b"\r\n", b"\n"))
+        os.replace(tmp, path)  # whole or not at all: another controller may be reading it
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def expr_to_bytes(expr: str) -> bytes:
@@ -121,6 +156,8 @@ class BasicMecabController:
         """
         super().__init__()
         check_mecab_rc()
+        for name in ("dicrc", "mecabrc"):
+            mend_line_endings(os.path.join(SUPPORT_DIR, name))
         self._verbose = verbose
         self._mecab_cmd = normalize_for_platform((mecab_cmd or self._mecab_cmd) + (mecab_args or self._mecab_args))
         if in_process is None:

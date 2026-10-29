@@ -19,7 +19,7 @@ import threading
 import pytest
 
 from . import mecab_library
-from .basic_mecab_controller import BACKEND_ENV, BasicMecabController, in_process_by_default
+from .basic_mecab_controller import BACKEND_ENV, BasicMecabController, in_process_by_default, mend_line_endings
 from .mecab_controller import MecabController
 from .mecab_exe_finder import IS_ANDROID, SUPPORT_DIR, get_bundled_executable
 from .mecab_library import (
@@ -99,6 +99,22 @@ def test_backend_from_environment_rejects_a_typo(monkeypatch):
     monkeypatch.setenv(BACKEND_ENV, "in-process")
     with pytest.raises(ValueError, match=BACKEND_ENV):
         in_process_by_default()
+
+
+CRLF_DICRC = b"; a config file checked out on Windows\r\n\r\ncost-factor = 800\r\n"
+
+
+def test_mend_line_endings(tmp_path):
+    dicrc = tmp_path / "dicrc"
+    dicrc.write_bytes(CRLF_DICRC)
+    mend_line_endings(str(dicrc))
+    assert dicrc.read_bytes() == CRLF_DICRC.replace(b"\r\n", b"\n")
+    assert os.listdir(tmp_path) == ["dicrc"]
+
+    mended = os.stat(dicrc)
+    mend_line_endings(str(dicrc))
+    assert os.stat(dicrc).st_ino == mended.st_ino, "a file with LF line endings is left alone"
+    mend_line_endings(str(tmp_path / "missing"))  # nothing to mend, and no error
 
 
 def test_an_executable_that_cannot_start_is_named(tmp_path):
