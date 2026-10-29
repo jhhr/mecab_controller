@@ -9,11 +9,12 @@ Android 10 or later may not exec a file from its private storage either. It can 
 shared library from private storage, the way Python loads its own extension modules there. So on
 Android the bundled library is copied into the app's private storage and loaded from there.
 
-InProcessMecab.run() takes the bytes the executable would read from stdin and returns the bytes
-it would write, stderr included, for the same command line. That is what keeps a field the
-phone writes identical to the one the desktop writes, once the two sync. The executable reads
-its input a line at a time into a buffer of --input-buffer-size bytes, tags each line as a C
-string and writes each result as it comes; run() does the same with the library's own parse.
+InProcessMecab.run() takes the bytes the executable would read from stdin and returns what it
+would write to stdout for the same command line, and the error it would stop with. That is what
+keeps a field the phone writes identical to the one the desktop writes, once the two sync. The
+executable reads its input a line at a time into a buffer of --input-buffer-size bytes, tags
+each line as a C string and writes each result as it comes; run() does the same with the
+library's own parse.
 """
 
 from __future__ import annotations
@@ -227,13 +228,6 @@ UNSUPPORTED_OPTIONS = ("output", "partial", "dump-config", "dictionary-info", "v
 MIN_INPUT_BUFFER_SIZE = 8192
 MAX_INPUT_BUFFER_SIZE = 8192 * 640
 NBEST_MAX = 512
-# What the executable writes to stderr, which the subprocess merges into its output. The
-# bundled builds are not all one version (Linux 0.98, Windows 0.98pre3, macOS and Android
-# 0.996), and the executable's loop changed in between, so the library's own version decides:
-# the warning about --lattice-level came with 0.99, and "splitted" became "split" during 0.991.
-LATTICE_LEVEL_WARNING = b"lattice-level is DEPERCATED. use --marginal or --nbest.\n"
-OVERFLOW_WARNING = b"input-buffer overflow. The line is split. use -b #SIZE option.\n"
-OLD_OVERFLOW_WARNING = b"input-buffer overflow. The line is splitted. use -b #SIZE option.\n"
 
 
 def version_tuple(version: bytes) -> tuple[int, ...]:
@@ -330,9 +324,6 @@ class InProcessMecab:
             MAX_INPUT_BUFFER_SIZE,
             max(mecab_int(options.get("input-buffer-size", "0")), MIN_INPUT_BUFFER_SIZE),
         )
-        self._lattice_level = mecab_int(options.get("lattice-level", "0"))
-        self._preamble = b""
-        self._overflow_warning = OVERFLOW_WARNING
         self._lock = threading.Lock()
         self._lib: Optional[ctypes.CDLL] = None
         self._tagger: Optional[int] = None
@@ -402,29 +393,30 @@ class InProcessMecab:
         lib.mecab_version.argtypes = ()
         lib.mecab_version.restype = ctypes.c_char_p
 
+        # The bundled builds are not all one version (Linux 0.98, Windows 0.98pre3, macOS and
+        # Android 0.996), and the executable's loop changed in between.
         version = version_tuple(lib.mecab_version() or b"")
         self._args = list(self._argv)
         if version < (0, 99) and self._nbest >= 2:
             self._args.append(b"--lattice-level=1")  # what the executable did before 0.99
-        if version >= (0, 99) and self._lattice_level >= 1:
-            self._preamble = LATTICE_LEVEL_WARNING
-        if version < (0, 991):
-            self._overflow_warning = OLD_OVERFLOW_WARNING
         self._lib, self.library_path = lib, path
         return lib
 
-    def run(self, data: bytes) -> bytes:
-        """What the executable writes, stdout and stderr together, when data is its stdin."""
+    def run(self, data: bytes) -> tuple[bytes, Optional[str]]:
+        """
+        What the executable writes to stdout when data is its stdin, and, where it would stop
+        with a failure, MeCab's message (which the executable prints last, to stdout as well).
+        What it writes to stderr, a warning about an overlong line or --lattice-level, is not
+        part of it.
+        """
         with self._lock:
             lib, tagger = self._start()
-            out = [self._preamble]
+            out: list[bytes] = []
             pos = 0
             while True:
-                line, pos, eof, overflow = getline(data, pos, self._buffer_size)
+                line, pos, eof, _overflow = getline(data, pos, self._buffer_size)
                 if eof and line[:1] in (b"", b"\0"):
                     break
-                if overflow:
-                    out.append(self._overflow_warning)
                 # The executable hands MeCab the buffer as a C string, which ends at a NUL.
                 sentence = line.split(b"\0", 1)[0]
                 if self._nbest >= 2:
@@ -436,11 +428,11 @@ class InProcessMecab:
                     # tagger and model, as the next executable would: MeCab's error log never
                     # clears (it resets the stream's flags, not its text), so a model that has
                     # failed once reports its old errors in front of every new one.
-                    out.append((lib.mecab_strerror(tagger) or b"") + b"\n")
+                    error = (lib.mecab_strerror(tagger) or b"").decode("utf-8", "replace")
                     lib.mecab_destroy(tagger)
                     if self._model:
                         lib.mecab_model_destroy(self._model)
                     self._tagger = self._model = None
-                    break
+                    return b"".join(out), error
                 out.append(result)
-            return b"".join(out)
+            return b"".join(out), None

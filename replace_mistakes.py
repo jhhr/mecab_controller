@@ -2,7 +2,6 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 import dataclasses
 from collections.abc import Iterable, Sequence
-from typing import Optional
 
 try:
     from .basic_types import Inflection, MecabParsedToken, PartOfSpeech
@@ -24,36 +23,52 @@ def replace_mistakes(tokens: Iterable[MecabParsedToken]) -> Iterable[MecabParsed
         yield from replace_mistake(wrapped.token, consumed, idx)
 
 
-def slice_headwords(
-    context: Sequence[WrappedToken], start: int, end: int
-) -> Optional[tuple[str, ...]]:
+def slice_headwords(context: Sequence[WrappedToken], start: int, end: int) -> tuple[str, ...] | None:
     try:
         return tuple(context[idx].token.headword for idx in range(start, end))
     except IndexError:
         return None
 
 
-def take_headword(context: Sequence[WrappedToken], pos: int) -> Optional[str]:
+def slice_context(context: Sequence[WrappedToken], start: int, end: int) -> str | None:
+    """Join token surfaces in a context window or return None if it is incomplete."""
+    try:
+        return "".join(context[idx].token.word for idx in range(start, end))
+    except IndexError:
+        return None
+
+
+def take_headword(context: Sequence[WrappedToken], pos: int) -> str | None:
     try:
         return context[pos].token.headword
     except IndexError:
         return None
 
 
-def take_word(context: Sequence[WrappedToken], pos: int) -> Optional[str]:
+def take_word(context: Sequence[WrappedToken], pos: int) -> str | None:
     try:
         return context[pos].token.word
     except IndexError:
         return None
 
 
-def replace_mistake(
-    token: MecabParsedToken, context: Sequence[WrappedToken], pos: int
-) -> Iterable[MecabParsedToken]:
-    if token.word == "放っ" and slice_headwords(context, pos + 1, pos + 3) in (
-        ("て", "おく"),
-        ("て", "おける"),
-    ):
+def skip_context(context: Sequence[WrappedToken], start: int, end: int) -> None:
+    for idx in range(start, end):
+        context[idx].skip = True
+
+
+def replace_mistake(token: MecabParsedToken, context: Sequence[WrappedToken], pos: int) -> Iterable[MecabParsedToken]:
+    if (merged_word := slice_context(context, pos, pos + 3)) in ("かもしれない", "かも知れない"):
+        # Pitch accent lookup indexes both spellings as katakana.
+        skip_context(context, pos + 1, pos + 3)
+        yield MecabParsedToken(
+            word=merged_word,
+            headword=merged_word,
+            katakana_reading="カモシレナイ",
+            part_of_speech=PartOfSpeech.bound_auxiliary,
+            inflection_type=Inflection.dictionary_form,
+        )
+    elif token.word == "放っ" and slice_headwords(context, pos + 1, pos + 3) in (("て", "おく"), ("て", "おける")):
         yield dataclasses.replace(token, headword="放る", katakana_reading="ホウッ")
     elif token.word == "温玉" and token.headword == "オンセンタマゴ":
         yield dataclasses.replace(
@@ -161,7 +176,7 @@ def replace_mistake(
             headword="旅立つ",
         )
     elif token.word == "羽" and take_headword(context, pos + 1) == "撃":
-        context[pos + 1].skip = True
+        skip_context(context, pos + 1, pos + 2)
         yield MecabParsedToken(
             word="羽撃",
             headword="羽撃く",
@@ -170,8 +185,7 @@ def replace_mistake(
             inflection_type=Inflection.irrealis,
         )
     elif token.word == "阿良" and slice_headwords(context, pos + 1, pos + 3) == ("々", "木"):
-        context[pos + 1].skip = True
-        context[pos + 2].skip = True
+        skip_context(context, pos + 1, pos + 3)
         yield MecabParsedToken(
             word="阿良々木",
             headword="阿良々木",
@@ -180,8 +194,7 @@ def replace_mistake(
             inflection_type=Inflection.dictionary_form,
         )
     elif token.word == "乗り" and slice_headwords(context, pos + 1, pos + 3) == ("込", "え"):
-        context[pos + 1].skip = True
-        context[pos + 2].skip = True
+        skip_context(context, pos + 1, pos + 3)
         yield MecabParsedToken(
             word="乗り込え",
             headword="乗り込える",
@@ -194,7 +207,7 @@ def replace_mistake(
         and token.katakana_reading == "スケ"
         and slice_headwords(context, pos + 1, pos + 3) == ("から", "ない")
     ):
-        context[pos + 1].skip = True
+        skip_context(context, pos + 1, pos + 2)
         yield MecabParsedToken(
             word="助から",
             headword="助かる",
@@ -203,7 +216,7 @@ def replace_mistake(
             inflection_type=Inflection.irrealis,
         )
     elif token.word == "いい気" and take_headword(context, pos + 1) == "分":
-        context[pos + 1].skip = True
+        skip_context(context, pos + 1, pos + 2)
         yield MecabParsedToken(
             word="いい",
             headword="いい",

@@ -1,28 +1,30 @@
 # Copyright: Ren Tatsumoto <tatsu at autistici.org> and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
-
+import contextlib
 import functools
 import os
 import subprocess
 import tempfile
-from typing import Optional
+import typing
 
 try:
     from .mecab_exe_finder import IS_ANDROID, IS_WIN, SUPPORT_DIR, find_executable
-    from .mecab_library import InProcessMecab, MecabUnavailableError, describe_os_error, describe_platform
+    from .mecab_library import InProcessMecab, MecabUnavailableError, describe_platform
 except ImportError:
     from mecab_exe_finder import IS_ANDROID, IS_WIN, SUPPORT_DIR, find_executable
-    from mecab_library import InProcessMecab, MecabUnavailableError, describe_os_error, describe_platform
+    from mecab_library import InProcessMecab, MecabUnavailableError, describe_platform
 
 INPUT_BUFFER_SIZE = str(819200)
-MECAB_RC_PATH = os.path.join(SUPPORT_DIR, "mecabrc")
+MECAB_TIMEOUT_SEC = 5
+MECAB_RC_PATH = SUPPORT_DIR / "mecabrc"
 # "in_process" or "subprocess": how MeCab runs when the code that makes the controller does not
 # say. For trying one backend in place of the other without touching that code.
 BACKEND_ENV = "MECAB_CONTROLLER_BACKEND"
 
 
 @functools.cache
-def startup_info():
+def startup_info() -> typing.Any:
+    """Return Windows startup settings that suppress the console window."""
     if IS_WIN:
         # Prevents a console window from popping up on Windows
         si = subprocess.STARTUPINFO()
@@ -33,7 +35,7 @@ def startup_info():
 
 
 @functools.cache
-def find_best_dic_dir():
+def find_best_dic_dir() -> str:
     """
     If the user has mecab-ipadic-neologd (or mecab-ipadic) installed, pick its system dictionary.
     """
@@ -48,20 +50,21 @@ def find_best_dic_dir():
     for directory in possible_locations:
         if os.path.isdir(directory):
             return directory
-    return SUPPORT_DIR
+    return str(SUPPORT_DIR)
 
 
 def normalize_for_platform(popen: list[str]) -> list[str]:
+    """Normalize command paths for the current platform."""
     if IS_WIN:
         popen = [os.path.normpath(x) for x in popen]
     return popen
 
 
-def check_mecab_rc():
-    if not os.path.isfile(MECAB_RC_PATH):
-        with open(MECAB_RC_PATH, "w") as f:
-            # create mecabrc if it doesn't exist
-            f.write("")
+def check_mecab_rc() -> None:
+    """Create the bundled mecabrc file when it does not exist."""
+    if MECAB_RC_PATH.is_file():
+        return
+    MECAB_RC_PATH.write_text("", encoding="utf-8")
 
 
 def mend_line_endings(path: str) -> None:
@@ -98,14 +101,6 @@ def mend_line_endings(path: str) -> None:
             pass
 
 
-def expr_to_bytes(expr: str) -> bytes:
-    return expr.encode("utf-8", "ignore") + b"\n"
-
-
-def mecab_output_to_str(outs: bytes) -> str:
-    return outs.rstrip(b"\r\n").decode("utf-8", "replace")
-
-
 def in_process_by_default() -> bool:
     """
     Android cannot start the executable (see mecab_library.py), so MeCab runs in process there.
@@ -122,34 +117,114 @@ def in_process_by_default() -> bool:
     return IS_ANDROID
 
 
-def prepend_library_path() -> None:
+class MecabProcessError(RuntimeError):
+    """Raised when MeCab launch, communication, timeout, or exit validation fails."""
+
+
+class MecabProcessOutput(typing.NamedTuple):
+    """Capture the separate standard streams emitted by a MeCab process."""
+
+    stdout: str
+    stderr: str
+
+
+def mecab_subprocess_environment() -> dict[str, str]:
+    """Return a private environment that loads AJT's bundled MeCab library first."""
+    environment = os.environ.copy()
     for library_path in ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
         try:
-            os.environ[library_path] = f"{SUPPORT_DIR}:{os.environ[library_path]}"
+            environment[library_path] = f"{SUPPORT_DIR}{os.pathsep}{environment[library_path]}"
         except KeyError:
-            os.environ[library_path] = SUPPORT_DIR
+            environment[library_path] = str(SUPPORT_DIR)
+    return environment
+
+
+def kill_and_drain_process(proc: subprocess.Popen[str]) -> MecabProcessOutput:
+    """Terminate a failed MeCab process, reap it, and return its remaining output."""
+    with contextlib.suppress(OSError):
+        proc.kill()
+    try:
+        return MecabProcessOutput(*proc.communicate())
+    except OSError:
+        return MecabProcessOutput("", "")
+
+
+def format_error_msg(error: str, output: MecabProcessOutput) -> str:
+    """Append MeCab's standard-error output to an error message when available."""
+    if output.stderr:
+        return f"{error} stderr: {output.stderr}"
+    return error
+
+
+def is_windows_username_error(output: MecabProcessOutput) -> bool:
+    """Return whether MeCab failed because the Windows user name has non-ASCII characters."""
+    diagnostics = f"{output.stdout}\n{output.stderr}"
+    return "tagger.cpp" in diagnostics and "no such file or directory" in diagnostics
+
+
+def communicate_with_mecab(proc: subprocess.Popen[str], expr: str, command: list[str]) -> MecabProcessOutput:
+    """Communicate with MeCab and turn timeout or pipe failures into structured errors."""
+    try:
+        return MecabProcessOutput(*proc.communicate(f"{expr}\n", timeout=MECAB_TIMEOUT_SEC))
+    except subprocess.TimeoutExpired as ex:
+        raise MecabProcessError(
+            format_error_msg(
+                f"MeCab command {command!r} timed out after {MECAB_TIMEOUT_SEC} seconds.",
+                output=kill_and_drain_process(proc),
+            )
+        ) from ex
+    except OSError as ex:
+        raise MecabProcessError(
+            format_error_msg(
+                f"Unable to communicate with MeCab command {command!r}: {ex}",
+                output=kill_and_drain_process(proc),
+            )
+        ) from ex
+
+
+def start_mecab_process(command: list[str]) -> subprocess.Popen[str]:
+    """Start MeCab with private library paths and UTF-8 text streams."""
+    try:
+        return subprocess.Popen(
+            command,
+            bufsize=-1,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startup_info(),
+            env=mecab_subprocess_environment(),
+        )
+    except OSError as ex:
+        raise MecabProcessError(f"Unable to start MeCab command {command!r} on {describe_platform()}: {ex}") from ex
 
 
 class BasicMecabController:
+    """Run the bundled MeCab executable with AJT's configured dictionaries."""
+
     _mecab_cmd: list[str] = [
         find_executable("mecab"),
-        "--dicdir=" + find_best_dic_dir(),
-        "--rcfile=" + MECAB_RC_PATH,
-        "--userdic=" + os.path.join(SUPPORT_DIR, "user_dic.dic"),
-        "--input-buffer-size=" + INPUT_BUFFER_SIZE,
+        f"--dicdir={find_best_dic_dir()}",
+        f"--rcfile={MECAB_RC_PATH}",
+        f"--userdic={SUPPORT_DIR.joinpath('user_dic.dic')}",
+        f"--input-buffer-size={INPUT_BUFFER_SIZE}",
     ]
     _mecab_args: list[str] = []
     _verbose: bool
-    _in_process: Optional[InProcessMecab]
+    _in_process: InProcessMecab | None
 
     def __init__(
         self,
-        mecab_cmd: Optional[list[str]] = None,
-        mecab_args: Optional[list[str]] = None,
+        mecab_cmd: list[str] | None = None,
+        mecab_args: list[str] | None = None,
         verbose: bool = False,
-        in_process: Optional[bool] = None,
+        in_process: bool | None = None,
     ) -> None:
         """
+        Initialize MeCab with optional command overrides for standalone use and tests.
+
         in_process: load libmecab into this process instead of starting the executable for each
         call; None leaves it to in_process_by_default(). In process, the options of mecab_cmd
         are given to the library bundled in "support", whatever program the command names.
@@ -163,8 +238,6 @@ class BasicMecabController:
         if in_process is None:
             in_process = in_process_by_default()
         self._in_process = InProcessMecab(self._mecab_cmd) if in_process else None
-        if not in_process:
-            prepend_library_path()
         if self._verbose:
             print("mecab cmd:", self._mecab_cmd, "(in process)" if in_process else "")
 
@@ -173,41 +246,38 @@ class BasicMecabController:
         return self._in_process is not None
 
     def run(self, expr: str) -> str:
+        """Run MeCab for one expression and return its standard output."""
         if self._in_process is not None:
-            outs = self._in_process.run(expr_to_bytes(expr))
-        else:
-            outs = self._run_executable(expr)
-
-        str_out = mecab_output_to_str(outs)
-        if "tagger.cpp" in str_out and "no such file or directory" in str_out:
-            raise RuntimeError("Please ensure your Windows user name contains only English characters.")
-        return str_out
-
-    def _run_executable(self, expr: str) -> bytes:
-        try:
-            proc = subprocess.Popen(
-                self._mecab_cmd,
-                bufsize=-1,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                startupinfo=startup_info(),
+            return self._run_in_process(expr)
+        proc = start_mecab_process(self._mecab_cmd)
+        output = communicate_with_mecab(proc, expr, self._mecab_cmd)
+        if is_windows_username_error(output):
+            raise MecabProcessError("Please ensure your Windows user name contains only English characters.")
+        if proc.returncode:
+            raise MecabProcessError(
+                f"MeCab exited with status {proc.returncode}. command: {self._mecab_cmd!r}. stderr: {output.stderr}."
             )
-        except OSError as e:
-            exe = self._mecab_cmd[0]
-            raise MecabUnavailableError(
-                f"MeCab could not be started on {describe_platform()}: {exe}: {describe_os_error(e, exe)}"
-            ) from e
+        return output.stdout.strip("\r\n")
 
+    def _run_in_process(self, expr: str) -> str:
+        """
+        What run() returns from the executable, with MeCab loaded into this process instead.
+        The text goes in and comes out as start_mecab_process's text streams pass it: UTF-8 with
+        errors replaced, and on the way back \\r\\n and \\r read as \\n (universal newlines).
+        """
+        assert self._in_process is not None
         try:
-            outs, errs = proc.communicate(expr_to_bytes(expr), timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            outs, errs = proc.communicate()
-        return outs
+            stdout, error = self._in_process.run(f"{expr}\n".encode("utf-8", "replace"))
+        except MecabUnavailableError as ex:
+            raise MecabProcessError(str(ex)) from ex
+        if error is not None:
+            # Where the executable would have printed this and exited with a failure.
+            raise MecabProcessError(f"MeCab failed in process. command: {self._mecab_cmd!r}. error: {error}")
+        text = stdout.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+        return text.strip("\r\n")
 
 
-def main():
+def main() -> None:
     mecab = BasicMecabController()
 
     try_expressions = (

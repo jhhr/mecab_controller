@@ -60,11 +60,11 @@ class MecabController:
 
     def __init__(
         self,
-        mecab_cmd: Optional[list[str]] = None,
-        mecab_args: Optional[list[str]] = None,
+        mecab_cmd: list[str] | None = None,
+        mecab_args: list[str] | None = None,
         verbose: bool = False,
         cache_max_size: int = 1024,
-        in_process: Optional[bool] = None,
+        in_process: bool | None = None,
     ) -> None:
         self._mecab = BasicMecabController(
             mecab_cmd=mecab_cmd,
@@ -126,7 +126,7 @@ class MecabController:
         return buf.getvalue()
 
 
-def main():
+def main() -> None:
     mecab = MecabController()
 
     try_expressions = (
@@ -162,6 +162,7 @@ def main():
         "拗らせる,拗らせちゃった",
         "打付ける,打付けた",
         "遣る方無い",
+        "死んだよ",
     )
     for idx, expr in enumerate(try_expressions):
         print(f"expr  #{idx:02d}: {mecab.reading(expr)}")

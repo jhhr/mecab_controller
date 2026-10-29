@@ -19,9 +19,16 @@ import threading
 import pytest
 
 from . import mecab_library
-from .basic_mecab_controller import BACKEND_ENV, BasicMecabController, in_process_by_default, mend_line_endings
+from .basic_mecab_controller import (
+    BACKEND_ENV,
+    BasicMecabController,
+    MecabProcessError,
+    in_process_by_default,
+    mecab_subprocess_environment,
+    mend_line_endings,
+)
 from .mecab_controller import MecabController
-from .mecab_exe_finder import IS_ANDROID, SUPPORT_DIR, get_bundled_executable
+from .mecab_exe_finder import IS_ANDROID, get_bundled_executable
 from .mecab_library import (
     InProcessMecab,
     MecabUnavailableError,
@@ -120,10 +127,11 @@ def test_mend_line_endings(tmp_path):
 def test_an_executable_that_cannot_start_is_named(tmp_path):
     missing = str(tmp_path / "no-such-mecab")
     mecab = BasicMecabController(mecab_cmd=[missing], in_process=False)
-    with pytest.raises(MecabUnavailableError) as error:
+    with pytest.raises(MecabProcessError) as error:
         mecab.run("x")
     message = str(error.value)
-    assert sys.platform in message and missing in message and "FileNotFoundError" in message
+    assert sys.platform in message and missing in message
+    assert isinstance(error.value.__cause__, FileNotFoundError)
 
 
 def test_a_library_that_cannot_load_is_named(monkeypatch, tmp_path):
@@ -134,6 +142,9 @@ def test_a_library_that_cannot_load_is_named(monkeypatch, tmp_path):
     message = str(error.value)
     assert sys.platform in message and missing in message
     assert isinstance(error.value.__cause__, OSError)
+    # The controller raises what it raises for an executable that cannot start.
+    with pytest.raises(MecabProcessError, match="libmecab-missing"):
+        BasicMecabController(in_process=True).run("x")
 
 
 def test_a_tagger_that_cannot_start_says_why(library_path, tmp_path):
@@ -153,11 +164,23 @@ BASE_CMD = [get_bundled_executable("mecab")] + BasicMecabController._mecab_cmd[1
 
 
 def run_executable(cmd, data):
-    env = dict(os.environ, LD_LIBRARY_PATH=SUPPORT_DIR, DYLD_LIBRARY_PATH=SUPPORT_DIR)
+    """The executable's stdout and exit status, data on its stdin; stderr is not compared."""
     try:
-        return subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env).stdout
+        done = subprocess.run(
+            cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=mecab_subprocess_environment()
+        )
     except OSError as e:
         pytest.skip(f"the bundled executable cannot run here: {e}")
+    return done.stdout, done.returncode
+
+
+def as_the_executable(result):
+    """What run_executable gives where InProcessMecab.run gives result: the executable prints
+    MeCab's error after the output so far, and exits with EXIT_FAILURE."""
+    stdout, error = result
+    if error is None:
+        return stdout, 0
+    return stdout + error.encode() + b"\n", 1
 
 
 @pytest.fixture(scope="module")
@@ -190,14 +213,14 @@ LONG_LINE = "あ".encode() * 3000  # 9000 bytes, so a split falls inside a chara
         pytest.param(["-b8192"], b"x" * 20000, id="a line split twice, no newline"),
         pytest.param(["--input-buffer-size=10"], LONG_LINE + b"\n", id="a buffer below the minimum"),
         pytest.param(["--nbest=2"], SENTENCE + b"\n", id="n-best"),
-        pytest.param(["--lattice-level=1"], SENTENCE + b"\n", id="the lattice-level warning"),
+        pytest.param(["--lattice-level=1"], SENTENCE + b"\n", id="a lattice level, warned about on stderr"),
         pytest.param(["-Owakati"], SENTENCE + b"\n", id="an output format"),
         pytest.param(MecabController._mecab_args, SENTENCE + b"\n", id="the controller's formats"),
     ],
 )
 def test_in_process_is_the_executable(library_path, options, data):
     cmd = BASE_CMD + options
-    assert InProcessMecab(cmd).run(data) == run_executable(cmd, data)
+    assert as_the_executable(InProcessMecab(cmd).run(data)) == run_executable(cmd, data)
 
 
 def test_an_error_is_reported_as_by_a_fresh_executable(library_path):
@@ -206,17 +229,29 @@ def test_an_error_is_reported_as_by_a_fresh_executable(library_path):
     cmd = BASE_CMD + ["--node-format=%m|%f[7]\\n"]
     mecab = InProcessMecab(cmd)
     expected = run_executable(cmd, b"xyz\n")
-    assert b"out of range" in expected
-    assert mecab.run(b"xyz\n") == expected
-    assert mecab.run(b"xyz\n") == expected
-    assert mecab.run(SENTENCE + b"\n") == run_executable(cmd, SENTENCE + b"\n")
+    assert b"out of range" in expected[0] and expected[1] != 0
+    assert as_the_executable(mecab.run(b"xyz\n")) == expected
+    assert as_the_executable(mecab.run(b"xyz\n")) == expected
+    assert as_the_executable(mecab.run(SENTENCE + b"\n")) == run_executable(cmd, SENTENCE + b"\n")
+    with pytest.raises(MecabProcessError, match="out of range"):
+        BasicMecabController(mecab_cmd=cmd, in_process=True).run("xyz")
 
 
 def test_the_controller_is_the_same_either_way(library_path):
     cmd = BASE_CMD + BasicMecabController._mecab_cmd[4:]
     subprocess_mecab = BasicMecabController(mecab_cmd=cmd, mecab_args=MecabController._mecab_args, in_process=False)
     in_process_mecab = BasicMecabController(mecab_cmd=cmd, mecab_args=MecabController._mecab_args, in_process=True)
-    for expr in ("カリン、自分でまいた種は自分で刈り取れ", "彼２０００万も使った。", "", "放っておいて\n二人の美人"):
+    exprs = (
+        "カリン、自分でまいた種は自分で刈り取れ",
+        "彼２０００万も使った。",
+        "",
+        "放っておいて\n二人の美人",
+        # The text streams read \r\n and \r as \n, and replace what UTF-8 cannot encode.
+        "日本\r語",
+        "改行\r\nのある文",
+        "\udcffテスト",
+    )
+    for expr in exprs:
         assert in_process_mecab.run(expr) == subprocess_mecab.run(expr)
 
 
