@@ -336,26 +336,41 @@ class InProcessMecab:
         self._lock = threading.Lock()
         self._lib: Optional[ctypes.CDLL] = None
         self._tagger: Optional[int] = None
+        self._model: Optional[int] = None  # the tagger's, when the library has the model API
+        self._has_model_api = False
         self.library_path: Optional[str] = None
 
     def _start(self) -> tuple[ctypes.CDLL, int]:
         lib = self._lib if self._lib is not None else self._load()
         if self._tagger is None:
-            import ctypes
-
-            # mecab_new, not mecab_new2: that one splits a single string at whitespace with no
-            # quoting, so a dictionary path with a space in it would come apart.
-            argv = (ctypes.c_char_p * (len(self._args) + 1))(*self._args, None)
-            tagger = lib.mecab_new(len(self._args), argv)
-            if not tagger:
-                # A failed mecab_new keeps its error per thread, and this is the same thread.
-                what = (lib.mecab_strerror(None) or b"").decode("utf-8", "replace")
-                options = " ".join(os.fsdecode(arg) for arg in self._args[1:])
-                raise MecabUnavailableError(
-                    f"MeCab could not start from {self.library_path} with options {options}: {what}"
-                )
-            self._tagger = tagger
+            self._model, self._tagger = self._new_tagger(lib)
         return lib, self._tagger
+
+    def _new_tagger(self, lib: ctypes.CDLL) -> tuple[Optional[int], int]:
+        import ctypes
+
+        # The argc/argv forms, not mecab_new2 or mecab_model_new2: those split a single string at
+        # whitespace with no quoting, so a dictionary path with a space in it would come apart.
+        argv = (ctypes.c_char_p * (len(self._args) + 1))(*self._args, None)
+        model = None
+        if self._has_model_api:
+            # A model and then a tagger, as the executable makes them since 0.99. mecab_new would
+            # tag the same, but when the dictionaries fail to open it loses why: its createTagger
+            # overwrites the error the model recorded with the tagger's own, which is empty.
+            model = lib.mecab_model_new(len(self._args), argv)
+            tagger = lib.mecab_model_new_tagger(model) if model else None
+        else:
+            tagger = lib.mecab_new(len(self._args), argv)
+        if not tagger:
+            # The error of a failed open is kept per thread, and this is the same thread.
+            what = (lib.mecab_strerror(None) or b"").decode("utf-8", "replace") or "MeCab gave no reason"
+            if model:
+                lib.mecab_model_destroy(model)
+            options = " ".join(os.fsdecode(arg) for arg in self._args[1:])
+            raise MecabUnavailableError(
+                f"MeCab could not start from {self.library_path} with options {options}: {what}"
+            )
+        return model, tagger
 
     def _load(self) -> ctypes.CDLL:
         import ctypes
@@ -365,6 +380,14 @@ class InProcessMecab:
         lib.mecab_new.restype = ctypes.c_void_p
         lib.mecab_destroy.argtypes = (ctypes.c_void_p,)
         lib.mecab_destroy.restype = None
+        self._has_model_api = hasattr(lib, "mecab_model_new")  # 0.99 and later
+        if self._has_model_api:
+            lib.mecab_model_new.argtypes = (ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
+            lib.mecab_model_new.restype = ctypes.c_void_p
+            lib.mecab_model_new_tagger.argtypes = (ctypes.c_void_p,)
+            lib.mecab_model_new_tagger.restype = ctypes.c_void_p
+            lib.mecab_model_destroy.argtypes = (ctypes.c_void_p,)
+            lib.mecab_model_destroy.restype = None
         lib.mecab_strerror.argtypes = (ctypes.c_void_p,)
         lib.mecab_strerror.restype = ctypes.c_char_p
         lib.mecab_sparse_tostr2.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t)
@@ -410,12 +433,14 @@ class InProcessMecab:
                     result = lib.mecab_sparse_tostr2(tagger, sentence, len(sentence))
                 if result is None:
                     # The executable prints what went wrong and stops. The next run gets a new
-                    # tagger, as the next executable would: MeCab's error log never clears
-                    # (it resets the stream's flags, not its text), so a tagger that has failed
-                    # once reports its old errors in front of every new one.
+                    # tagger and model, as the next executable would: MeCab's error log never
+                    # clears (it resets the stream's flags, not its text), so a model that has
+                    # failed once reports its old errors in front of every new one.
                     out.append((lib.mecab_strerror(tagger) or b"") + b"\n")
                     lib.mecab_destroy(tagger)
-                    self._tagger = None
+                    if self._model:
+                        lib.mecab_model_destroy(self._model)
+                    self._tagger = self._model = None
                     break
                 out.append(result)
             return b"".join(out)

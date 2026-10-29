@@ -136,6 +136,16 @@ def test_a_library_that_cannot_load_is_named(monkeypatch, tmp_path):
     assert isinstance(error.value.__cause__, OSError)
 
 
+def test_a_tagger_that_cannot_start_says_why(library_path, tmp_path):
+    """MeCab 0.996 drops the reason when mecab_new fails; through a model it keeps it. A CRLF
+    dicrc is one such reason: MeCab reads it before any dictionary."""
+    (tmp_path / "dicrc").write_bytes(CRLF_DICRC)
+    (tmp_path / "mecabrc").write_bytes(b"")
+    mecab = InProcessMecab(["mecab", f"--dicdir={tmp_path}", f"--rcfile={tmp_path / 'mecabrc'}"])
+    with pytest.raises(MecabUnavailableError, match="format error"):
+        mecab.run(b"x\n")
+
+
 # The executable and its options, without the --input-buffer-size the controller adds, so that
 # the cases can set their own. The bundled executable, not one installed on the system, so that
 # both sides are the same MeCab.
